@@ -1,0 +1,76 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  CUSTOMER
+  SUPPORT
+  ADMIN
+}
+
+enum TransferStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum EntryType {
+  DEBIT
+  CREDIT
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  role         UserRole  @default(CUSTOMER)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  wallets      Wallet[]
+
+  @@map("users")
+}
+
+model Wallet {
+  id            String        @id @default(uuid()) @db.Uuid
+  userId        String        @map("user_id") @db.Uuid
+  currency      String        @default("INR")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerEntries LedgerEntry[]
+
+  @@unique([userId, currency])
+  @@map("wallets")
+}
+
+model Transfer {
+  id              String         @id @default(uuid()) @db.Uuid
+  amount          Int // Stored in micro-units/cents (e.g., 1000 = ₹10.00)
+  idempotencyKey  String         @unique @map("idempotency_key")
+  status          TransferStatus @default(PENDING)
+  description     String?
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  ledgerEntries   LedgerEntry[]
+
+  @@map("transfers")
+}
+
+model LedgerEntry {
+  id         String    @id @default(uuid()) @db.Uuid
+  walletId   String    @map("wallet_id") @db.Uuid
+  transferId String    @map("transfer_id") @db.Uuid
+  type       EntryType
+  amount     Int // Negative for DEBIT, Positive for CREDIT
+  createdAt  DateTime  @default(now()) @map("created_at")
+  wallet     Wallet    @relation(fields: [walletId], references: [id])
+  transfer   Transfer  @relation(fields: [transferId], references: [id], onDelete: Cascade)
+
+  @@index([walletId, type])
+  @@map("ledger_entries")
+}

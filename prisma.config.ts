@@ -3,12 +3,21 @@
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
 
+// MIGRATE_TARGET=supabase points the Prisma CLI (migrate/studio/introspect) at
+// Supabase's direct connection; anything else defaults to your local Postgres.
+// This only affects CLI commands - the running app always uses DATABASE_URL
+// directly (see src/prisma/prisma.service.ts), regardless of this setting.
+const migrateUrl =
+  process.env.MIGRATE_TARGET === "supabase"
+    ? process.env.DIRECT_URL
+    : process.env.LOCAL_DATABASE_URL;
+
 export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
   },
   datasource: {
-    url: process.env.DATABASE_URL,
+    url: migrateUrl,
   },
 });

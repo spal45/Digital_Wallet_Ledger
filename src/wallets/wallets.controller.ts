@@ -19,6 +19,8 @@ import { CurrentUserResponseDto } from '../auth/dto/current-user-response.dto';
 import { WalletsService } from './wallets.service';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { WalletResponseDto } from './dto/wallet-response.dto';
+import { DepositDto } from './dto/deposit.dto';
+import { DepositResponseDto } from './dto/deposit-response.dto';
 
 @ApiTags('wallets')
 @ApiBearerAuth('access-token')
@@ -72,5 +74,22 @@ export class WalletsController {
     @CurrentUser() user: CurrentUserResponseDto,
   ) {
     return this.walletsService.findOne(id, user);
+  }
+
+  @Post(':id/deposit')
+  @ApiOperation({ summary: 'Deposit funds into a wallet (idempotent)' })
+  @ApiResponse({
+    status: 201,
+    description: 'Deposit completed',
+    type: DepositResponseDto,
+  })
+  @ApiResponse({ status: 403, description: "Not this user's wallet" })
+  @ApiResponse({ status: 404, description: 'Wallet not found' })
+  deposit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserResponseDto,
+    @Body() dto: DepositDto,
+  ) {
+    return this.walletsService.deposit(id, user, dto);
   }
 }

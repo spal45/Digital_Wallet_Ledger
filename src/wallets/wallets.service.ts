@@ -4,13 +4,17 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, UserRole } from '@prisma/client';
+import {
+  EntryType,
+  LedgerEntry,
+  Prisma,
+  Transfer,
+  TransferStatus,
+  UserRole,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-
-export interface AuthenticatedUser {
-  userId: string;
-  role: UserRole;
-}
+import { AuthenticatedUser } from '../auth/authenticated-user.interface';
+import { DepositDto } from './dto/deposit.dto';
 
 @Injectable()
 export class WalletsService {
@@ -76,11 +80,90 @@ export class WalletsService {
     return { ...wallet, balance };
   }
 
+  async deposit(
+    walletId: string,
+    currentUser: AuthenticatedUser,
+    dto: DepositDto,
+  ) {
+    const existing = await this.findTransferByIdempotencyKey(
+      dto.idempotencyKey,
+    );
+    if (existing) {
+      return this.toDepositResponse(existing, walletId);
+    }
+
+    const wallet = await this.prisma.wallet.findUnique({
+      where: { id: walletId },
+    });
+    if (!wallet) {
+      throw new NotFoundException('Wallet not found');
+    }
+
+    const isOwner = wallet.userId === currentUser.userId;
+    const isPrivileged =
+      currentUser.role === UserRole.ADMIN ||
+      currentUser.role === UserRole.SUPPORT;
+    if (!isOwner && !isPrivileged) {
+      throw new ForbiddenException('You do not have access to this wallet');
+    }
+
+    try {
+      const transfer = await this.prisma.transfer.create({
+        data: {
+          amount: dto.amount,
+          idempotencyKey: dto.idempotencyKey,
+          description: dto.description,
+          status: TransferStatus.COMPLETED,
+          ledgerEntries: {
+            create: [{ walletId, type: EntryType.CREDIT, amount: dto.amount }],
+          },
+        },
+        include: { ledgerEntries: true },
+      });
+      return this.toDepositResponse(transfer, walletId);
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        // A concurrent request with the same idempotency key won the race; return its result.
+        const winner = await this.findTransferByIdempotencyKey(
+          dto.idempotencyKey,
+        );
+        if (winner) {
+          return this.toDepositResponse(winner, walletId);
+        }
+      }
+      throw error;
+    }
+  }
+
   private async getBalance(walletId: string): Promise<number> {
     const result = await this.prisma.ledgerEntry.aggregate({
       where: { walletId },
       _sum: { amount: true },
     });
     return result._sum.amount ?? 0;
+  }
+
+  private findTransferByIdempotencyKey(idempotencyKey: string) {
+    return this.prisma.transfer.findUnique({
+      where: { idempotencyKey },
+      include: { ledgerEntries: true },
+    });
+  }
+
+  private toDepositResponse(
+    transfer: Transfer & { ledgerEntries: LedgerEntry[] },
+    walletId: string,
+  ) {
+    return {
+      transferId: transfer.id,
+      walletId,
+      amount: transfer.amount,
+      status: transfer.status,
+      description: transfer.description,
+      createdAt: transfer.createdAt,
+    };
   }
 }

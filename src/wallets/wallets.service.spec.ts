@@ -8,11 +8,23 @@ import { Prisma, UserRole } from '@prisma/client';
 import { WalletsService } from './wallets.service';
 import { PrismaService } from '../prisma/prisma.service';
 
+interface TransferCreateArgs {
+  data: {
+    ledgerEntries: {
+      create: { walletId: string; type: string; amount: number }[];
+    };
+  };
+}
+
 describe('WalletsService', () => {
   let service: WalletsService;
   let prisma: {
     wallet: { create: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
     ledgerEntry: { groupBy: jest.Mock; aggregate: jest.Mock };
+    transfer: {
+      findUnique: jest.Mock;
+      create: jest.Mock<Promise<unknown>, [TransferCreateArgs]>;
+    };
   };
 
   beforeEach(async () => {
@@ -25,6 +37,10 @@ describe('WalletsService', () => {
       ledgerEntry: {
         groupBy: jest.fn(),
         aggregate: jest.fn(),
+      },
+      transfer: {
+        findUnique: jest.fn(),
+        create: jest.fn<Promise<unknown>, [TransferCreateArgs]>(),
       },
     };
 
@@ -164,6 +180,131 @@ describe('WalletsService', () => {
       });
 
       expect(result.balance).toBe(0);
+    });
+  });
+
+  describe('deposit', () => {
+    const dto = { amount: 500, idempotencyKey: 'deposit-key-1' };
+
+    it('returns the existing deposit without reprocessing when the idempotency key was already used', async () => {
+      prisma.transfer.findUnique.mockResolvedValue({
+        id: 'transfer-1',
+        amount: 500,
+        status: 'COMPLETED',
+        description: null,
+        createdAt: new Date(),
+        ledgerEntries: [{ walletId: 'wallet-1', type: 'CREDIT', amount: 500 }],
+      });
+
+      const result = await service.deposit(
+        'wallet-1',
+        { userId: 'user-1', role: UserRole.CUSTOMER },
+        dto,
+      );
+
+      expect(prisma.wallet.findUnique).not.toHaveBeenCalled();
+      expect(prisma.transfer.create).not.toHaveBeenCalled();
+      expect(result).toEqual(
+        expect.objectContaining({
+          transferId: 'transfer-1',
+          walletId: 'wallet-1',
+          amount: 500,
+        }),
+      );
+    });
+
+    it('throws not found when the wallet does not exist', async () => {
+      prisma.transfer.findUnique.mockResolvedValue(null);
+      prisma.wallet.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.deposit(
+          'missing-wallet',
+          { userId: 'user-1', role: UserRole.CUSTOMER },
+          dto,
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it("throws forbidden when depositing into someone else's wallet", async () => {
+      prisma.transfer.findUnique.mockResolvedValue(null);
+      prisma.wallet.findUnique.mockResolvedValue({
+        id: 'wallet-1',
+        userId: 'owner-id',
+        currency: 'INR',
+      });
+
+      await expect(
+        service.deposit(
+          'wallet-1',
+          { userId: 'someone-else', role: UserRole.CUSTOMER },
+          dto,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('creates a single credit ledger entry for a valid deposit', async () => {
+      prisma.transfer.findUnique.mockResolvedValue(null);
+      prisma.wallet.findUnique.mockResolvedValue({
+        id: 'wallet-1',
+        userId: 'user-1',
+        currency: 'INR',
+      });
+      prisma.transfer.create.mockResolvedValue({
+        id: 'transfer-2',
+        amount: 500,
+        status: 'COMPLETED',
+        description: undefined,
+        createdAt: new Date(),
+        ledgerEntries: [{ walletId: 'wallet-1', type: 'CREDIT', amount: 500 }],
+      });
+
+      const result = await service.deposit(
+        'wallet-1',
+        { userId: 'user-1', role: UserRole.CUSTOMER },
+        dto,
+      );
+
+      const createArgs = prisma.transfer.create.mock.calls[0][0];
+      expect(createArgs.data.ledgerEntries.create).toEqual([
+        { walletId: 'wallet-1', type: 'CREDIT', amount: 500 },
+      ]);
+      expect(result.transferId).toBe('transfer-2');
+      expect(result.walletId).toBe('wallet-1');
+    });
+
+    it('returns the winning deposit when a concurrent duplicate request races on the idempotency key', async () => {
+      prisma.transfer.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'transfer-winner',
+          amount: 500,
+          status: 'COMPLETED',
+          description: null,
+          createdAt: new Date(),
+          ledgerEntries: [
+            { walletId: 'wallet-1', type: 'CREDIT', amount: 500 },
+          ],
+        });
+      prisma.wallet.findUnique.mockResolvedValue({
+        id: 'wallet-1',
+        userId: 'user-1',
+        currency: 'INR',
+      });
+      prisma.transfer.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+      );
+
+      const result = await service.deposit(
+        'wallet-1',
+        { userId: 'user-1', role: UserRole.CUSTOMER },
+        dto,
+      );
+
+      expect(result.transferId).toBe('transfer-winner');
     });
   });
 });

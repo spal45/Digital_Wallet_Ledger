@@ -4,6 +4,6 @@ import { TransfersController } from './transfers.controller';
 
 @Module({
   providers: [TransfersService],
-  controllers: [TransfersController]
+  controllers: [TransfersController],
 })
 export class TransfersModule {}

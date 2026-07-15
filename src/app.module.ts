@@ -8,7 +8,13 @@ import { WebhooksModule } from './webhooks/webhooks.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
-  imports: [AuthModule, WalletsModule, TransfersModule, WebhooksModule, PrismaModule],
+  imports: [
+    AuthModule,
+    WalletsModule,
+    TransfersModule,
+    WebhooksModule,
+    PrismaModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

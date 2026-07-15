@@ -5,16 +5,34 @@ import * as argon2 from 'argon2';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 
+interface StoredUser {
+  id: string;
+  email: string;
+  role: string;
+  passwordHash: string;
+}
+
 describe('AuthService', () => {
   let service: AuthService;
-  let prisma: { user: { findUnique: jest.Mock; create: jest.Mock } };
+  let prisma: {
+    user: {
+      findUnique: jest.Mock<Promise<StoredUser | null>, [unknown]>;
+      create: jest.Mock<
+        Promise<StoredUser>,
+        [{ data: { email: string; passwordHash: string } }]
+      >;
+    };
+  };
   let jwtService: { signAsync: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
       user: {
-        findUnique: jest.fn(),
-        create: jest.fn(),
+        findUnique: jest.fn<Promise<StoredUser | null>, [unknown]>(),
+        create: jest.fn<
+          Promise<StoredUser>,
+          [{ data: { email: string; passwordHash: string } }]
+        >(),
       },
     };
     jwtService = {
@@ -34,10 +52,18 @@ describe('AuthService', () => {
 
   describe('register', () => {
     it('throws a conflict if the email is already taken', async () => {
-      prisma.user.findUnique.mockResolvedValue({ id: 'existing-id' });
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'existing-id',
+        email: 'taken@example.com',
+        role: 'CUSTOMER',
+        passwordHash: 'hashed',
+      });
 
       await expect(
-        service.register({ email: 'taken@example.com', password: 'password123' }),
+        service.register({
+          email: 'taken@example.com',
+          password: 'password123',
+        }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(prisma.user.create).not.toHaveBeenCalled();
     });
@@ -51,13 +77,20 @@ describe('AuthService', () => {
         passwordHash: 'hashed',
       });
 
-      const result = await service.register({ email: 'new@example.com', password: 'password123' });
+      const result = await service.register({
+        email: 'new@example.com',
+        password: 'password123',
+      });
 
       expect(prisma.user.create).toHaveBeenCalledTimes(1);
       const createArgs = prisma.user.create.mock.calls[0][0];
       expect(createArgs.data.email).toBe('new@example.com');
       expect(createArgs.data.passwordHash).not.toBe('password123');
-      expect(result).toEqual({ id: 'new-id', email: 'new@example.com', role: 'CUSTOMER' });
+      expect(result).toEqual({
+        id: 'new-id',
+        email: 'new@example.com',
+        role: 'CUSTOMER',
+      });
     });
   });
 
@@ -80,7 +113,10 @@ describe('AuthService', () => {
       });
 
       await expect(
-        service.login({ email: 'user@example.com', password: 'wrong-password' }),
+        service.login({
+          email: 'user@example.com',
+          password: 'wrong-password',
+        }),
       ).rejects.toBeInstanceOf(UnauthorizedException);
     });
 
@@ -93,7 +129,10 @@ describe('AuthService', () => {
         passwordHash,
       });
 
-      const result = await service.login({ email: 'user@example.com', password: 'correct-password' });
+      const result = await service.login({
+        email: 'user@example.com',
+        password: 'correct-password',
+      });
 
       expect(jwtService.signAsync).toHaveBeenCalledWith({
         sub: 'user-id',

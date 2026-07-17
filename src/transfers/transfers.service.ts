@@ -37,94 +37,126 @@ export class TransfersService {
       return this.toResponse(existing);
     }
 
-    try {
-      const transfer = await this.prisma.$transaction(
-        async (tx) => {
-          // Lock both wallets in a fixed order (by id) so two concurrent transfers
-          // moving money in opposite directions between the same pair of wallets
-          // can't deadlock on each other's locks.
-          const [firstId, secondId] = [dto.fromWalletId, dto.toWalletId].sort();
-          const lockedWallets = new Map<string, LockedWalletRow>();
-          for (const walletId of [firstId, secondId]) {
-            const rows = await tx.$queryRaw<LockedWalletRow[]>`
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const transfer = await this.executeTransferTransaction(
+          currentUser,
+          dto,
+        );
+        return this.toResponse(transfer);
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002'
+        ) {
+          // A concurrent request with the same idempotency key won the race; return its result.
+          const winner = await this.findByIdempotencyKey(dto.idempotencyKey);
+          if (winner) {
+            return this.toResponse(winner);
+          }
+          throw error;
+        }
+
+        // Postgres can report a false-cycle deadlock when many transactions queue
+        // FOR UPDATE on the same row simultaneously, even with consistent lock
+        // ordering (a documented multixact edge case under heavy contention).
+        // Retrying the whole transaction, as Postgres's own docs recommend, is
+        // the correct response - it's a transient condition, not a logic error.
+        const isLastAttempt = attempt === maxAttempts;
+        if (this.isDeadlockError(error) && !isLastAttempt) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    /* istanbul ignore next -- unreachable: the loop above always returns or throws */
+    throw new Error('Transfer failed after retries');
+  }
+
+  private executeTransferTransaction(
+    currentUser: AuthenticatedUser,
+    dto: CreateTransferDto,
+  ) {
+    return this.prisma.$transaction(
+      async (tx) => {
+        // Lock both wallets in a fixed order (by id) so two concurrent transfers
+        // moving money in opposite directions between the same pair of wallets
+        // can't deadlock on each other's locks.
+        const [firstId, secondId] = [dto.fromWalletId, dto.toWalletId].sort();
+        const lockedWallets = new Map<string, LockedWalletRow>();
+        for (const walletId of [firstId, secondId]) {
+          const rows = await tx.$queryRaw<LockedWalletRow[]>`
             SELECT id, user_id AS "userId", currency FROM wallets WHERE id = ${walletId}::uuid FOR UPDATE
           `;
-            const wallet = rows[0];
-            if (!wallet) {
-              throw new NotFoundException(`Wallet ${walletId} not found`);
-            }
-            lockedWallets.set(walletId, wallet);
+          const wallet = rows[0];
+          if (!wallet) {
+            throw new NotFoundException(`Wallet ${walletId} not found`);
           }
-
-          const fromWallet = lockedWallets.get(dto.fromWalletId)!;
-          const toWallet = lockedWallets.get(dto.toWalletId)!;
-
-          const isOwner = fromWallet.userId === currentUser.userId;
-          const isPrivileged =
-            currentUser.role === UserRole.ADMIN ||
-            currentUser.role === UserRole.SUPPORT;
-          if (!isOwner && !isPrivileged) {
-            throw new ForbiddenException(
-              'You do not have access to the source wallet',
-            );
-          }
-
-          if (fromWallet.currency !== toWallet.currency) {
-            throw new BadRequestException(
-              'Cannot transfer between wallets with different currencies',
-            );
-          }
-
-          const balanceResult = await tx.ledgerEntry.aggregate({
-            where: { walletId: fromWallet.id },
-            _sum: { amount: true },
-          });
-          const balance = balanceResult._sum.amount ?? 0;
-          if (balance < dto.amount) {
-            throw new UnprocessableEntityException('Insufficient balance');
-          }
-
-          return tx.transfer.create({
-            data: {
-              amount: dto.amount,
-              idempotencyKey: dto.idempotencyKey,
-              description: dto.description,
-              status: TransferStatus.COMPLETED,
-              ledgerEntries: {
-                create: [
-                  {
-                    walletId: fromWallet.id,
-                    type: EntryType.DEBIT,
-                    amount: -dto.amount,
-                  },
-                  {
-                    walletId: toWallet.id,
-                    type: EntryType.CREDIT,
-                    amount: dto.amount,
-                  },
-                ],
-              },
-            },
-            include: { ledgerEntries: true },
-          });
-        },
-        { maxWait: 30000, timeout: 30000 },
-      );
-
-      return this.toResponse(transfer);
-    } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        // A concurrent request with the same idempotency key won the race; return its result.
-        const winner = await this.findByIdempotencyKey(dto.idempotencyKey);
-        if (winner) {
-          return this.toResponse(winner);
+          lockedWallets.set(walletId, wallet);
         }
-      }
-      throw error;
-    }
+
+        const fromWallet = lockedWallets.get(dto.fromWalletId)!;
+        const toWallet = lockedWallets.get(dto.toWalletId)!;
+
+        const isOwner = fromWallet.userId === currentUser.userId;
+        const isPrivileged =
+          currentUser.role === UserRole.ADMIN ||
+          currentUser.role === UserRole.SUPPORT;
+        if (!isOwner && !isPrivileged) {
+          throw new ForbiddenException(
+            'You do not have access to the source wallet',
+          );
+        }
+
+        if (fromWallet.currency !== toWallet.currency) {
+          throw new BadRequestException(
+            'Cannot transfer between wallets with different currencies',
+          );
+        }
+
+        const balanceResult = await tx.ledgerEntry.aggregate({
+          where: { walletId: fromWallet.id },
+          _sum: { amount: true },
+        });
+        const balance = balanceResult._sum.amount ?? 0;
+        if (balance < dto.amount) {
+          throw new UnprocessableEntityException('Insufficient balance');
+        }
+
+        return tx.transfer.create({
+          data: {
+            amount: dto.amount,
+            idempotencyKey: dto.idempotencyKey,
+            description: dto.description,
+            status: TransferStatus.COMPLETED,
+            ledgerEntries: {
+              create: [
+                {
+                  walletId: fromWallet.id,
+                  type: EntryType.DEBIT,
+                  amount: -dto.amount,
+                },
+                {
+                  walletId: toWallet.id,
+                  type: EntryType.CREDIT,
+                  amount: dto.amount,
+                },
+              ],
+            },
+          },
+          include: { ledgerEntries: true },
+        });
+      },
+      { maxWait: 30000, timeout: 30000 },
+    );
+  }
+
+  private isDeadlockError(error: unknown): boolean {
+    return (
+      error instanceof Error && error.message.includes('deadlock detected')
+    );
   }
 
   async findAllForUser(userId: string) {

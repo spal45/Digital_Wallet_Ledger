@@ -8,10 +8,18 @@ export class PrismaService
   implements OnModuleInit, OnModuleDestroy
 {
   constructor() {
+    const connectionString = process.env.DATABASE_URL;
+    const isLocalDatabase =
+      connectionString?.includes('localhost') ||
+      connectionString?.includes('127.0.0.1');
+
     super({
       adapter: new PrismaPg({
-        connectionString: process.env.DATABASE_URL,
-        ssl: { rejectUnauthorized: false },
+        connectionString,
+        // Supabase's pooler presents a cert chain Node doesn't fully trust by
+        // default; local Postgres doesn't support SSL at all, so only relax
+        // verification for non-local connections.
+        ...(isLocalDatabase ? {} : { ssl: { rejectUnauthorized: false } }),
       }),
     });
   }

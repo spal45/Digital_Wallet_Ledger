@@ -5,3 +5,7 @@ import 'dotenv/config';
 process.env.DATABASE_URL =
   process.env.LOCAL_DATABASE_URL ??
   'postgresql://spal@localhost:5432/digital_wallet?schema=public';
+
+// .env sets DATABASE_SSL=true for Supabase; local/CI Postgres doesn't
+// support SSL at all, so this must be unset here too, not just DATABASE_URL.
+delete process.env.DATABASE_SSL;

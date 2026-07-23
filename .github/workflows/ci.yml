@@ -50,6 +50,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate Prisma Client
+        # Needed before lint/typecheck/build - @prisma/client's real types
+        # (User, Prisma.*, etc.) don't exist until this runs, since they're
+        # generated from schema.prisma rather than hand-written.
+        run: npx prisma generate
+
       - name: Lint
         # No --fix here: CI should fail loudly if code isn't already clean,
         # not silently patch it. `npm run lint` (with --fix) is for your own

@@ -1,0 +1,72 @@
+name: CI
+
+# When to run this workflow: every push to main, and every pull request
+# targeting main. This is the "when X happens" part.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    # A temporary, empty Postgres that lives only for this one CI run - used
+    # by the e2e concurrency test, which needs a real database (unlike the
+    # unit tests, which fully mock Prisma and need nothing real).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wallet
+          POSTGRES_PASSWORD: wallet
+          POSTGRES_DB: digital_wallet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U wallet -d digital_wallet"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      # No .env file exists in CI (it's gitignored, and shouldn't be
+      # committed) - these are provided directly as CI-only values instead.
+      LOCAL_DATABASE_URL: postgresql://wallet:wallet@localhost:5432/digital_wallet
+      JWT_SECRET: ci-only-test-secret-never-used-anywhere-real
+      JWT_EXPIRES_IN: 15m
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        # No --fix here: CI should fail loudly if code isn't already clean,
+        # not silently patch it. `npm run lint` (with --fix) is for your own
+        # machine; this is the check-only version.
+        run: npx eslint "{src,apps,libs,test}/**/*.ts"
+
+      - name: Type check
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Apply migrations to the CI database
+        run: npx prisma migrate deploy
+
+      - name: End-to-end tests (including the transfer concurrency test)
+        run: npm run test:e2e
+
+      - name: Build
+        run: npm run build

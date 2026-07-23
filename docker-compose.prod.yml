@@ -1,0 +1,12 @@
+# Production/deployment setup: runs only the app container, pointed at your
+# real Supabase database (see .env.production.example for required vars).
+# Unlike docker-compose.yml, there is no bundled `db` service here - this is
+# meant to connect to an already-existing database, not create a throwaway one.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "3000:3000"

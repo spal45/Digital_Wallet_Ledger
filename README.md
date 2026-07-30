@@ -1,100 +1,193 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Digital Wallet Ledger
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+[![CI](https://github.com/spal45/Digital_Wallet_Ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/spal45/Digital_Wallet_Ledger/actions/workflows/ci.yml)
+[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen)](https://digitalwalletledger-production.up.railway.app/docs)
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+A backend service for moving money between wallets, built the way real financial systems are built: an **append-only double-entry ledger**, **idempotent transfers**, and **row-level locking** to guarantee correctness under concurrent load — not a single mutable `balance` column that trusts every write to be correct.
 
-## Description
+**Live API + interactive docs:** https://digitalwalletledger-production.up.railway.app/docs
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Why this project
 
-## Project setup
+Most CRUD portfolio projects fake money movement with `UPDATE wallets SET balance = balance - amount`. That approach silently breaks the moment two requests touch the same wallet at once, and it leaves no audit trail of *how* a balance got to where it is. This project is built around the two properties that actually matter for a ledger:
 
-```bash
-$ npm install
+- **A wallet's balance is never stored — it's derived.** Every transfer writes two immutable rows to a `ledger_entries` table (a debit and a matching credit). Balance is `SUM(amount)` over those rows. Nothing can silently overwrite history; the full transaction trail is always reconstructible.
+- **Correctness holds under real concurrency, not just in the happy path.** An automated test fires many simultaneous transfer requests against a wallet with a fixed balance and asserts the exact number succeed, the exact number are rejected, and the wallet never goes negative — see [Concurrency correctness](#concurrency-correctness) below.
+
+## Table of contents
+
+- [Architecture](#architecture)
+- [Tech stack](#tech-stack)
+- [API reference](#api-reference)
+- [Key engineering decisions](#key-engineering-decisions)
+- [Getting started](#getting-started)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [Project structure](#project-structure)
+
+## Architecture
+
+```mermaid
+erDiagram
+    User ||--o{ Wallet : owns
+    User ||--o{ Webhook : registers
+    Wallet ||--o{ LedgerEntry : "has entries"
+    Transfer ||--o{ LedgerEntry : "produces exactly 2"
+
+    User {
+        uuid id
+        string email
+        string passwordHash
+        enum role
+    }
+    Wallet {
+        uuid id
+        uuid userId
+        string currency
+    }
+    Transfer {
+        uuid id
+        int amount
+        string idempotencyKey
+        enum status
+    }
+    LedgerEntry {
+        uuid id
+        uuid walletId
+        uuid transferId
+        enum type "DEBIT or CREDIT"
+        int amount
+    }
+    Webhook {
+        uuid id
+        uuid userId
+        string url
+        string secret
+    }
 ```
 
-## Compile and run the project
+A transfer of ₹10 from Wallet A to Wallet B never touches a `balance` field. It creates one `Transfer` record and two `LedgerEntry` rows — `DEBIT -1000` on A, `CREDIT +1000` on B — inside a single database transaction. Query either wallet's balance at any point by summing its entries; the two sides always net to zero across the system.
+
+## Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Framework | [NestJS](https://nestjs.com) 11 + TypeScript | Structured DI, modules, and guards scale better than raw Express for a multi-domain API |
+| Database | PostgreSQL 16 (via [Supabase](https://supabase.com)) | Row-level locking (`SELECT ... FOR UPDATE`) and true ACID transactions are load-bearing here, not optional |
+| ORM | [Prisma](https://prisma.io) 7 + `@prisma/adapter-pg` | Driver-adapter model avoids Prisma's native query engine entirely — portable, WASM-based client |
+| Auth | JWT (`@nestjs/jwt`, `passport-jwt`) + `argon2` password hashing | Stateless auth, industry-standard password hashing (not bcrypt/md5) |
+| Validation | `class-validator` / `class-transformer` | Declarative DTO validation, enforced globally |
+| API docs | `@nestjs/swagger` | Live, interactive OpenAPI docs at `/docs` |
+| Testing | Jest + Supertest | Unit tests (mocked Prisma) + real e2e tests against a live Postgres |
+| Containerization | Docker (multi-stage build) + Docker Compose | Identical environment locally and in production |
+| CI | GitHub Actions | Lint, typecheck, unit tests, e2e tests against a service-container Postgres, and a production build on every push |
+| Hosting | Railway (app) + Supabase (database) | Container-native deploy, managed Postgres |
+
+## API reference
+
+Full interactive documentation (with a working "Authorize" flow) is at [`/docs`](https://digitalwalletledger-production.up.railway.app/docs). Summary:
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/auth/register` | — | Create an account |
+| `POST` | `/auth/login` | — | Exchange credentials for a JWT |
+| `GET` | `/auth/me` | ✓ | Return the authenticated user |
+| `POST` | `/wallets` | ✓ | Create a wallet (one per currency per user) |
+| `GET` | `/wallets` | ✓ | List your wallets with computed balances |
+| `GET` | `/wallets/:id` | ✓ | Get one wallet's balance |
+| `POST` | `/wallets/:id/deposit` | ✓ | Fund a wallet (idempotent) |
+| `POST` | `/transfers` | ✓ | Move money between two wallets (idempotent, atomic) |
+| `GET` | `/transfers` | ✓ | List transfers involving your wallets |
+| `GET` | `/transfers/:id` | ✓ | Get one transfer |
+| `POST` | `/webhooks` | ✓ | Register a URL to be notified on transfer completion |
+| `GET` | `/webhooks` | ✓ | List your registered webhooks |
+| `DELETE` | `/webhooks/:id` | ✓ | Remove a webhook |
+
+Routes marked ✓ require `Authorization: Bearer <token>`. `ADMIN`/`SUPPORT` roles can access any wallet or transfer; `CUSTOMER` is restricted to their own.
+
+## Key engineering decisions
+
+These are the parts of this project that came from actually hitting and solving real problems, not just following a tutorial.
+
+**Preventing double-spend under concurrency.** `TransfersService` locks both wallets involved with `SELECT ... FOR UPDATE`, always in a fixed order (sorted by id), before reading the balance. Locking in a consistent order specifically prevents deadlocks between two transfers moving money in opposite directions between the same wallet pair. Even so, under heavy contention (many requests queuing on the same row), Postgres's multixact mechanism can report a genuine deadlock cycle — confirmed by reproducing it live. The fix, matching Postgres's own documentation, is a bounded retry on deadlock, not a redesign.
+
+**Idempotency, including under a real race.** Every transfer and deposit carries a client-supplied `idempotencyKey`. A retried request with the same key returns the original result rather than reprocessing — verified for the sequential case and for two *simultaneous* duplicate requests racing on the database's unique constraint, where the loser catches the constraint violation and returns the winner's result instead of erroring.
+
+**Automated proof, not a one-off demo.** [`test/transfers-concurrency.e2e-spec.ts`](test/transfers-concurrency.e2e-spec.ts) boots the real app against a real Postgres, fires 10 concurrent transfer requests against an 800-balance wallet, and asserts exactly 8 succeed, exactly 2 are rejected, every successful transfer ID is unique, and both wallets' final balances are exact. This runs on every CI push.
+
+**Supabase's pooling modes are not interchangeable.** The app's normal queries use Supabase's Transaction pooler (many short-lived connections — right for high-concurrency API traffic). Migrations need a different guarantee: one stable session for their advisory lock. Reusing the Transaction pooler for migrations was tested directly and reliably hangs, confirming why a separate connection type is necessary. Supabase's raw "Direct connection" is IPv6-only, which silently breaks from inside Docker (containers only get outbound IPv4) — the actual fix is Supabase's **Session pooler**: IPv4-reachable, but with true single-session semantics.
+
+**Fire-and-forget webhooks.** Webhook delivery is dispatched after a transfer commits but is never awaited by the request path — a slow or failing third-party endpoint can't add latency to, or break, the transfer itself. Delivery is signed with HMAC-SHA256 so receivers can verify authenticity independently.
+
+## Getting started
+
+### Prerequisites
+- Node.js 22+
+- Docker Desktop (for the containerized path)
+- A PostgreSQL instance (local, or Docker Compose provides one)
+
+### Local development
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm install
+cp .env.example .env   # fill in DATABASE_URL, JWT_SECRET, etc.
+npm run migrate:dev
+npm run start:dev
 ```
 
-## Run tests
+API available at `http://localhost:3000`, docs at `http://localhost:3000/docs`.
+
+### With Docker Compose (app + its own Postgres)
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+docker compose up --build
 ```
+
+This builds the image, starts a dedicated Postgres container, applies migrations automatically on boot, and runs the app at `http://localhost:3000`.
+
+### Production-style deployment (app only, against an existing database)
+
+```bash
+cp .env.production.example .env.production   # fill in Supabase credentials
+docker compose -f docker-compose.prod.yml up --build
+```
+
+## Testing
+
+```bash
+npm test              # unit tests (Prisma fully mocked)
+npm run test:e2e       # e2e tests against a real local Postgres, including the concurrency proof
+npm run lint            # ESLint (strict, typed rules)
+```
+
+CI runs all of the above, plus a production build, on every push — see the badge at the top of this file or [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Deployment
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+- **App:** containerized via the multi-stage [`Dockerfile`](Dockerfile), deployed on [Railway](https://railway.com), built directly from this repo on every push to `main`.
+- **Database:** [Supabase](https://supabase.com) Postgres. The container's entrypoint ([`docker-entrypoint.sh`](docker-entrypoint.sh)) runs `prisma migrate deploy` on every boot, so schema changes ship automatically with the next deploy.
+- **Migrations locally vs. production** are deliberately separate workflows: `npm run migrate:dev` (local Postgres, generates new migration files) vs. `npm run migrate:deploy:supabase` (applies already-committed migrations to Supabase) — see [`prisma.config.ts`](prisma.config.ts).
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Project structure
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
 ```
+src/
+├── auth/          # Registration, login, JWT guards, RBAC (roles.guard.ts)
+├── wallets/        # Wallet creation, balance queries, deposits
+├── transfers/      # The core: atomic double-entry transfers with locking + idempotency
+├── webhooks/        # Signed delivery notifications on transfer completion
+└── prisma/         # PrismaService wired to the pg driver adapter
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+test/
+└── transfers-concurrency.e2e-spec.ts   # The concurrency correctness proof
 
-## Resources
+prisma/
+├── schema.prisma    # User, Wallet, Transfer, LedgerEntry, Webhook
+└── migrations/       # Versioned schema history
 
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+docs/                 # Beginner-oriented guides to NestJS/Prisma/PostgreSQL as used in this project
+```
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
-# Digital_Wallet_Ledger
-Enterprise-grade financial digital wallet backend built with NestJS, TypeScript, and PostgreSQL 16. Implements absolute transactional data consistency using an append-only double-entry ledger design, row-level concurrency locking (FOR UPDATE), dynamic balance derivation, and strict API idempotency rules.
+UNLICENSED — personal portfolio project.

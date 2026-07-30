@@ -15,6 +15,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/authenticated-user.interface';
+import { WebhooksService } from '../webhooks/webhooks.service';
 import { CreateTransferDto } from './dto/create-transfer.dto';
 
 interface LockedWalletRow {
@@ -25,7 +26,10 @@ interface LockedWalletRow {
 
 @Injectable()
 export class TransfersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly webhooksService: WebhooksService,
+  ) {}
 
   async create(currentUser: AuthenticatedUser, dto: CreateTransferDto) {
     if (dto.fromWalletId === dto.toWalletId) {
@@ -40,10 +44,21 @@ export class TransfersService {
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const transfer = await this.executeTransferTransaction(
-          currentUser,
-          dto,
+        const { transfer, fromWallet, toWallet } =
+          await this.executeTransferTransaction(currentUser, dto);
+
+        this.webhooksService.notifyTransferCompleted(
+          [fromWallet.userId, toWallet.userId],
+          {
+            transferId: transfer.id,
+            fromWalletId: fromWallet.id,
+            toWalletId: toWallet.id,
+            amount: transfer.amount,
+            status: transfer.status,
+            createdAt: transfer.createdAt,
+          },
         );
+
         return this.toResponse(transfer);
       } catch (error) {
         if (
@@ -125,7 +140,7 @@ export class TransfersService {
           throw new UnprocessableEntityException('Insufficient balance');
         }
 
-        return tx.transfer.create({
+        const transfer = await tx.transfer.create({
           data: {
             amount: dto.amount,
             idempotencyKey: dto.idempotencyKey,
@@ -148,6 +163,8 @@ export class TransfersService {
           },
           include: { ledgerEntries: true },
         });
+
+        return { transfer, fromWallet, toWallet };
       },
       { maxWait: 30000, timeout: 30000 },
     );

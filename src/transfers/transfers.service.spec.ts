@@ -8,6 +8,7 @@ import {
 import { Prisma, TransferStatus, UserRole } from '@prisma/client';
 import { TransfersService } from './transfers.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { WebhooksService } from '../webhooks/webhooks.service';
 
 interface WalletRow {
   id: string;
@@ -34,6 +35,7 @@ describe('TransfersService', () => {
     $transaction: jest.Mock;
     transfer: { findUnique: jest.Mock; findMany: jest.Mock };
   };
+  let webhooksService: { notifyTransferCompleted: jest.Mock };
 
   const wallets: Record<string, WalletRow> = {
     'wallet-from': { id: 'wallet-from', userId: 'user-1', currency: 'INR' },
@@ -53,6 +55,7 @@ describe('TransfersService', () => {
       ),
       transfer: { findUnique: jest.fn(), findMany: jest.fn() },
     };
+    webhooksService = { notifyTransferCompleted: jest.fn() };
 
     // $queryRaw is called once per wallet id, in sorted order; resolve using our fixture map.
     tx.$queryRaw.mockImplementation(
@@ -66,6 +69,7 @@ describe('TransfersService', () => {
       providers: [
         TransfersService,
         { provide: PrismaService, useValue: prisma },
+        { provide: WebhooksService, useValue: webhooksService },
       ],
     }).compile();
 
@@ -190,6 +194,32 @@ describe('TransfersService', () => {
     ]);
     expect(result.fromWalletId).toBe('wallet-from');
     expect(result.toWalletId).toBe('wallet-to');
+    expect(webhooksService.notifyTransferCompleted).toHaveBeenCalledWith(
+      ['user-1', 'user-2'],
+      expect.objectContaining({ transferId: 'transfer-2', amount: 100 }),
+    );
+  });
+
+  it('does not notify webhooks when the transfer is an idempotent replay', async () => {
+    const existing = {
+      id: 'transfer-1',
+      amount: 100,
+      status: TransferStatus.COMPLETED,
+      description: null,
+      createdAt: new Date(),
+      ledgerEntries: [
+        { walletId: 'wallet-from', type: 'DEBIT' },
+        { walletId: 'wallet-to', type: 'CREDIT' },
+      ],
+    };
+    prisma.transfer.findUnique.mockResolvedValue(existing);
+
+    await service.create(
+      { userId: 'user-1', role: UserRole.CUSTOMER },
+      baseDto,
+    );
+
+    expect(webhooksService.notifyTransferCompleted).not.toHaveBeenCalled();
   });
 
   it('returns the winning transfer when a concurrent duplicate request races on the idempotency key', async () => {

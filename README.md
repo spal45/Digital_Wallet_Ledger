@@ -99,7 +99,8 @@ Full interactive documentation (with a working "Authorize" flow) is at [`/docs`]
 | `POST` | `/transfers` | ✓ | Move money between two wallets (idempotent, atomic) |
 | `GET` | `/transfers` | ✓ | List transfers involving your wallets |
 | `GET` | `/transfers/:id` | ✓ | Get one transfer |
-| `POST` | `/webhooks` | ✓ | Register a URL to be notified on transfer completion |
+| `POST` | `/transfers/:id/reverse` | ✓ (ADMIN/SUPPORT) | Reverse a completed transfer via a new opposite-direction transfer |
+| `POST` | `/webhooks` | ✓ | Register a URL to be notified on transfer completion or reversal |
 | `GET` | `/webhooks` | ✓ | List your registered webhooks |
 | `DELETE` | `/webhooks/:id` | ✓ | Remove a webhook |
 
@@ -118,6 +119,8 @@ These are the parts of this project that came from actually hitting and solving 
 **Supabase's pooling modes are not interchangeable.** The app's normal queries use Supabase's Transaction pooler (many short-lived connections — right for high-concurrency API traffic). Migrations need a different guarantee: one stable session for their advisory lock. Reusing the Transaction pooler for migrations was tested directly and reliably hangs, confirming why a separate connection type is necessary. Supabase's raw "Direct connection" is IPv6-only, which silently breaks from inside Docker (containers only get outbound IPv4) — the actual fix is Supabase's **Session pooler**: IPv4-reachable, but with true single-session semantics.
 
 **Fire-and-forget webhooks.** Webhook delivery is dispatched after a transfer commits but is never awaited by the request path — a slow or failing third-party endpoint can't add latency to, or break, the transfer itself. Delivery is signed with HMAC-SHA256 so receivers can verify authenticity independently.
+
+**Reversal never mutates history.** `POST /transfers/:id/reverse` (ADMIN/SUPPORT only) doesn't edit or delete the original transfer's ledger entries — it creates a brand new transfer with the debit/credit flipped, and only then marks the original `REVERSED`. The append-only design that makes the ledger auditable in the first place is exactly what makes reversal safe: the full history of "money moved, then moved back" is always reconstructible, never overwritten.
 
 ## Getting started
 

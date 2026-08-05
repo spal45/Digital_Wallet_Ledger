@@ -13,12 +13,16 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { UserRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { CurrentUserResponseDto } from '../auth/dto/current-user-response.dto';
 import { TransfersService } from './transfers.service';
 import { CreateTransferDto } from './dto/create-transfer.dto';
 import { TransferResponseDto } from './dto/transfer-response.dto';
+import { ReverseTransferDto } from './dto/reverse-transfer.dto';
 
 @ApiTags('transfers')
 @ApiBearerAuth('access-token')
@@ -84,5 +88,35 @@ export class TransfersController {
     @CurrentUser() user: CurrentUserResponseDto,
   ) {
     return this.transfersService.findOne(id, user);
+  }
+
+  @Post(':id/reverse')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPPORT)
+  @ApiOperation({
+    summary:
+      'Reverse a completed transfer (ADMIN/SUPPORT only) by creating an opposite-direction transfer',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Reversal transfer created; the original is marked REVERSED',
+    type: TransferResponseDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Transfer is not in a reversible state',
+  })
+  @ApiResponse({ status: 403, description: 'Caller is not ADMIN or SUPPORT' })
+  @ApiResponse({ status: 404, description: 'Transfer not found' })
+  @ApiResponse({
+    status: 422,
+    description:
+      "Recipient's wallet no longer has sufficient balance to reverse",
+  })
+  reverse(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReverseTransferDto,
+  ) {
+    return this.transfersService.reverse(id, dto.description);
   }
 }

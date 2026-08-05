@@ -7,14 +7,17 @@ import {
 import { randomBytes, createHmac } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
-export interface TransferCompletedPayload {
+export interface TransferEventPayload {
   transferId: string;
   fromWalletId: string;
   toWalletId: string;
   amount: number;
   status: string;
   createdAt: Date;
+  reversedTransferId?: string;
 }
+
+type WebhookEvent = 'transfer.completed' | 'transfer.reversed';
 
 @Injectable()
 export class WebhooksService {
@@ -64,33 +67,57 @@ export class WebhooksService {
    */
   notifyTransferCompleted(
     userIds: string[],
-    payload: TransferCompletedPayload,
+    payload: TransferEventPayload,
   ): void {
-    this.dispatch(userIds, payload).catch((error: unknown) => {
-      this.logger.warn(
-        `Unexpected error dispatching webhooks: ${String(error)}`,
-      );
-    });
+    this.dispatch('transfer.completed', userIds, payload).catch(
+      (error: unknown) => {
+        this.logger.warn(
+          `Unexpected error dispatching webhooks: ${String(error)}`,
+        );
+      },
+    );
   }
 
-  private async dispatch(userIds: string[], payload: TransferCompletedPayload) {
+  /**
+   * Same fire-and-forget contract as notifyTransferCompleted, for the
+   * reversing transfer created by TransfersService.reverse().
+   */
+  notifyTransferReversed(
+    userIds: string[],
+    payload: TransferEventPayload,
+  ): void {
+    this.dispatch('transfer.reversed', userIds, payload).catch(
+      (error: unknown) => {
+        this.logger.warn(
+          `Unexpected error dispatching webhooks: ${String(error)}`,
+        );
+      },
+    );
+  }
+
+  private async dispatch(
+    event: WebhookEvent,
+    userIds: string[],
+    payload: TransferEventPayload,
+  ) {
     const webhooks = await this.prisma.webhook.findMany({
       where: { userId: { in: userIds }, isActive: true },
     });
 
     await Promise.allSettled(
       webhooks.map((webhook) =>
-        this.deliver(webhook.url, webhook.secret, payload),
+        this.deliver(event, webhook.url, webhook.secret, payload),
       ),
     );
   }
 
   private async deliver(
+    event: WebhookEvent,
     url: string,
     secret: string,
-    payload: TransferCompletedPayload,
+    payload: TransferEventPayload,
   ) {
-    const body = JSON.stringify({ event: 'transfer.completed', data: payload });
+    const body = JSON.stringify({ event, data: payload });
     const signature = createHmac('sha256', secret).update(body).digest('hex');
 
     try {

@@ -18,6 +18,7 @@ interface WalletRow {
 
 interface TransferCreateArgs {
   data: {
+    idempotencyKey: string;
     ledgerEntries: {
       create: { walletId: string; type: string; amount: number }[];
     };
@@ -29,13 +30,20 @@ describe('TransfersService', () => {
   let tx: {
     $queryRaw: jest.Mock;
     ledgerEntry: { aggregate: jest.Mock };
-    transfer: { create: jest.Mock<Promise<unknown>, [TransferCreateArgs]> };
+    transfer: {
+      create: jest.Mock<Promise<unknown>, [TransferCreateArgs]>;
+      findUnique: jest.Mock;
+      update: jest.Mock;
+    };
   };
   let prisma: {
     $transaction: jest.Mock;
     transfer: { findUnique: jest.Mock; findMany: jest.Mock };
   };
-  let webhooksService: { notifyTransferCompleted: jest.Mock };
+  let webhooksService: {
+    notifyTransferCompleted: jest.Mock;
+    notifyTransferReversed: jest.Mock;
+  };
 
   const wallets: Record<string, WalletRow> = {
     'wallet-from': { id: 'wallet-from', userId: 'user-1', currency: 'INR' },
@@ -47,7 +55,11 @@ describe('TransfersService', () => {
     tx = {
       $queryRaw: jest.fn(),
       ledgerEntry: { aggregate: jest.fn() },
-      transfer: { create: jest.fn<Promise<unknown>, [TransferCreateArgs]>() },
+      transfer: {
+        create: jest.fn<Promise<unknown>, [TransferCreateArgs]>(),
+        findUnique: jest.fn(),
+        update: jest.fn(),
+      },
     };
     prisma = {
       $transaction: jest.fn((callback: (tx: unknown) => unknown) =>
@@ -55,7 +67,10 @@ describe('TransfersService', () => {
       ),
       transfer: { findUnique: jest.fn(), findMany: jest.fn() },
     };
-    webhooksService = { notifyTransferCompleted: jest.fn() };
+    webhooksService = {
+      notifyTransferCompleted: jest.fn(),
+      notifyTransferReversed: jest.fn(),
+    };
 
     // $queryRaw is called once per wallet id, in sorted order; resolve using our fixture map.
     tx.$queryRaw.mockImplementation(
@@ -250,5 +265,137 @@ describe('TransfersService', () => {
     );
 
     expect(result.id).toBe('transfer-winner');
+  });
+
+  describe('reverse', () => {
+    const completedOriginal = {
+      id: 'transfer-1',
+      amount: 100,
+      status: TransferStatus.COMPLETED,
+      ledgerEntries: [
+        { walletId: 'wallet-from', type: 'DEBIT', amount: -100 },
+        { walletId: 'wallet-to', type: 'CREDIT', amount: 100 },
+      ],
+    };
+
+    it('returns the existing reversal without reprocessing when already reversed', async () => {
+      const existingReversal = {
+        id: 'reversal-1',
+        amount: 100,
+        status: TransferStatus.COMPLETED,
+        description: null,
+        createdAt: new Date(),
+        ledgerEntries: [
+          { walletId: 'wallet-to', type: 'DEBIT' },
+          { walletId: 'wallet-from', type: 'CREDIT' },
+        ],
+      };
+      prisma.transfer.findUnique.mockResolvedValue(existingReversal);
+
+      const result = await service.reverse('transfer-1');
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(result.id).toBe('reversal-1');
+    });
+
+    it('throws not found when the original transfer does not exist', async () => {
+      prisma.transfer.findUnique.mockResolvedValue(null); // no existing reversal
+      tx.transfer.findUnique.mockResolvedValue(null); // no original transfer
+
+      await expect(service.reverse('missing-transfer')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('rejects reversing a transfer that is not COMPLETED', async () => {
+      prisma.transfer.findUnique.mockResolvedValue(null);
+      tx.transfer.findUnique.mockResolvedValue({
+        ...completedOriginal,
+        status: TransferStatus.REVERSED,
+      });
+
+      await expect(service.reverse('transfer-1')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it("rejects when the recipient's wallet no longer has sufficient balance", async () => {
+      prisma.transfer.findUnique.mockResolvedValue(null);
+      tx.transfer.findUnique.mockResolvedValue(completedOriginal);
+      tx.ledgerEntry.aggregate.mockResolvedValue({ _sum: { amount: 50 } }); // wallet-to only has 50 left
+
+      await expect(service.reverse('transfer-1')).rejects.toBeInstanceOf(
+        UnprocessableEntityException,
+      );
+      expect(tx.transfer.create).not.toHaveBeenCalled();
+    });
+
+    it('creates an opposite-direction transfer and marks the original REVERSED', async () => {
+      prisma.transfer.findUnique.mockResolvedValue(null);
+      tx.transfer.findUnique.mockResolvedValue(completedOriginal);
+      tx.ledgerEntry.aggregate.mockResolvedValue({ _sum: { amount: 100 } });
+      tx.transfer.create.mockResolvedValue({
+        id: 'reversal-1',
+        amount: 100,
+        status: TransferStatus.COMPLETED,
+        description: 'Reversal of transfer transfer-1',
+        createdAt: new Date(),
+        ledgerEntries: [
+          { walletId: 'wallet-to', type: 'DEBIT', amount: -100 },
+          { walletId: 'wallet-from', type: 'CREDIT', amount: 100 },
+        ],
+      });
+
+      const result = await service.reverse('transfer-1');
+
+      const createArgs = tx.transfer.create.mock.calls[0][0];
+      expect(createArgs.data.idempotencyKey).toBe('reversal:transfer-1');
+      expect(createArgs.data.ledgerEntries.create).toEqual([
+        { walletId: 'wallet-to', type: 'DEBIT', amount: -100 },
+        { walletId: 'wallet-from', type: 'CREDIT', amount: 100 },
+      ]);
+      expect(tx.transfer.update).toHaveBeenCalledWith({
+        where: { id: 'transfer-1' },
+        data: { status: TransferStatus.REVERSED },
+      });
+      expect(result.id).toBe('reversal-1');
+      expect(result.fromWalletId).toBe('wallet-to');
+      expect(result.toWalletId).toBe('wallet-from');
+      expect(webhooksService.notifyTransferReversed).toHaveBeenCalledWith(
+        ['user-2', 'user-1'],
+        expect.objectContaining({
+          transferId: 'reversal-1',
+          reversedTransferId: 'transfer-1',
+        }),
+      );
+    });
+
+    it('returns the winning reversal when a concurrent duplicate request races', async () => {
+      prisma.transfer.findUnique
+        .mockResolvedValueOnce(null) // initial idempotency check finds nothing
+        .mockResolvedValueOnce({
+          id: 'reversal-winner',
+          amount: 100,
+          status: TransferStatus.COMPLETED,
+          description: null,
+          createdAt: new Date(),
+          ledgerEntries: [
+            { walletId: 'wallet-to', type: 'DEBIT' },
+            { walletId: 'wallet-from', type: 'CREDIT' },
+          ],
+        });
+      tx.transfer.findUnique.mockResolvedValue(completedOriginal);
+      tx.ledgerEntry.aggregate.mockResolvedValue({ _sum: { amount: 100 } });
+      tx.transfer.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+      );
+
+      const result = await service.reverse('transfer-1');
+
+      expect(result.id).toBe('reversal-winner');
+    });
   });
 });

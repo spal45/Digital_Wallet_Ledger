@@ -176,6 +176,169 @@ export class TransfersService {
     );
   }
 
+  async reverse(transferId: string, description?: string) {
+    const reversalKey = `reversal:${transferId}`;
+    const existingReversal = await this.findByIdempotencyKey(reversalKey);
+    if (existingReversal) {
+      return this.toResponse(existingReversal);
+    }
+
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const { reversal, fromWallet, toWallet } =
+          await this.executeReversalTransaction(
+            transferId,
+            reversalKey,
+            description,
+          );
+
+        this.webhooksService.notifyTransferReversed(
+          [fromWallet.userId, toWallet.userId],
+          {
+            transferId: reversal.id,
+            fromWalletId: fromWallet.id,
+            toWalletId: toWallet.id,
+            amount: reversal.amount,
+            status: reversal.status,
+            createdAt: reversal.createdAt,
+            reversedTransferId: transferId,
+          },
+        );
+
+        return this.toResponse(reversal);
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002'
+        ) {
+          // A concurrent duplicate reversal request won the race; return its result.
+          const winner = await this.findByIdempotencyKey(reversalKey);
+          if (winner) {
+            return this.toResponse(winner);
+          }
+          throw error;
+        }
+
+        const isLastAttempt = attempt === maxAttempts;
+        if (this.isDeadlockError(error) && !isLastAttempt) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    /* istanbul ignore next -- unreachable: the loop above always returns or throws */
+    throw new Error('Reversal failed after retries');
+  }
+
+  private executeReversalTransaction(
+    originalTransferId: string,
+    reversalKey: string,
+    description?: string,
+  ) {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const original = await tx.transfer.findUnique({
+          where: { id: originalTransferId },
+          include: { ledgerEntries: true },
+        });
+        if (!original) {
+          throw new NotFoundException('Transfer not found');
+        }
+        if (original.status !== TransferStatus.COMPLETED) {
+          throw new BadRequestException(
+            `Only completed transfers can be reversed (current status: ${original.status})`,
+          );
+        }
+
+        const debitEntry = original.ledgerEntries.find(
+          (entry) => entry.type === EntryType.DEBIT,
+        );
+        const creditEntry = original.ledgerEntries.find(
+          (entry) => entry.type === EntryType.CREDIT,
+        );
+        if (!debitEntry || !creditEntry) {
+          throw new BadRequestException(
+            'Original transfer has no ledger entries to reverse',
+          );
+        }
+
+        // Reversing means moving the money back: debit the original recipient,
+        // credit the original sender. Same fixed-order locking as a normal
+        // transfer, to stay consistent with the deadlock-avoidance strategy.
+        const [firstId, secondId] = [
+          debitEntry.walletId,
+          creditEntry.walletId,
+        ].sort();
+        const lockedWallets = new Map<string, LockedWalletRow>();
+        for (const walletId of [firstId, secondId]) {
+          const rows = await tx.$queryRaw<LockedWalletRow[]>`
+            SELECT id, user_id AS "userId", currency FROM wallets WHERE id = ${walletId}::uuid FOR UPDATE
+          `;
+          const wallet = rows[0];
+          if (!wallet) {
+            throw new NotFoundException(`Wallet ${walletId} not found`);
+          }
+          lockedWallets.set(walletId, wallet);
+        }
+
+        const originalFromWallet = lockedWallets.get(debitEntry.walletId)!;
+        const originalToWallet = lockedWallets.get(creditEntry.walletId)!;
+
+        const balanceResult = await tx.ledgerEntry.aggregate({
+          where: { walletId: originalToWallet.id },
+          _sum: { amount: true },
+        });
+        const balance = balanceResult._sum.amount ?? 0;
+        if (balance < original.amount) {
+          throw new UnprocessableEntityException(
+            "Cannot reverse: the recipient's wallet no longer has sufficient balance",
+          );
+        }
+
+        const reversal = await tx.transfer.create({
+          data: {
+            amount: original.amount,
+            idempotencyKey: reversalKey,
+            description: description ?? `Reversal of transfer ${original.id}`,
+            status: TransferStatus.COMPLETED,
+            ledgerEntries: {
+              create: [
+                {
+                  walletId: originalToWallet.id,
+                  type: EntryType.DEBIT,
+                  amount: -original.amount,
+                },
+                {
+                  walletId: originalFromWallet.id,
+                  type: EntryType.CREDIT,
+                  amount: original.amount,
+                },
+              ],
+            },
+          },
+          include: { ledgerEntries: true },
+        });
+
+        await tx.transfer.update({
+          where: { id: original.id },
+          data: { status: TransferStatus.REVERSED },
+        });
+
+        // The response's "fromWallet"/"toWallet" reflect this new reversal
+        // transfer's own direction (recipient -> original sender), not the
+        // original transfer's direction.
+        return {
+          reversal,
+          fromWallet: originalToWallet,
+          toWallet: originalFromWallet,
+        };
+      },
+      { maxWait: 30000, timeout: 30000 },
+    );
+  }
+
   async findAllForUser(userId: string) {
     const transfers = await this.prisma.transfer.findMany({
       where: { ledgerEntries: { some: { wallet: { userId } } } },

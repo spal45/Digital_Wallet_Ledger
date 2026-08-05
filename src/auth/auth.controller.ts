@@ -13,6 +13,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -28,6 +29,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
+  @Throttle({ default: { ttl: 60000, limit: 5 } })
   @ApiOperation({ summary: 'Create a new user account' })
   @ApiResponse({
     status: 201,
@@ -35,12 +37,17 @@ export class AuthController {
     type: UserResponseDto,
   })
   @ApiResponse({ status: 409, description: 'Email already registered' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too many registration attempts - try again later',
+  })
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
   }
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60000, limit: 5 } })
   @ApiOperation({ summary: 'Exchange email/password for a JWT access token' })
   @ApiResponse({
     status: 200,
@@ -48,6 +55,10 @@ export class AuthController {
     type: TokenResponseDto,
   })
   @ApiResponse({ status: 401, description: 'Invalid email or password' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too many login attempts - try again later',
+  })
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }

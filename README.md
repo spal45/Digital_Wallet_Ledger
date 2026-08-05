@@ -77,6 +77,7 @@ A transfer of ₹10 from Wallet A to Wallet B never touches a `balance` field. I
 | ORM | [Prisma](https://prisma.io) 7 + `@prisma/adapter-pg` | Driver-adapter model avoids Prisma's native query engine entirely — portable, WASM-based client |
 | Auth | JWT (`@nestjs/jwt`, `passport-jwt`) + `argon2` password hashing | Stateless auth, industry-standard password hashing (not bcrypt/md5) |
 | Validation | `class-validator` / `class-transformer` | Declarative DTO validation, enforced globally |
+| Rate limiting | `@nestjs/throttler` | Global default + a stricter per-route limit on `/auth/login` and `/auth/register` |
 | API docs | `@nestjs/swagger` | Live, interactive OpenAPI docs at `/docs` |
 | Testing | Jest + Supertest | Unit tests (mocked Prisma) + real e2e tests against a live Postgres |
 | Containerization | Docker (multi-stage build) + Docker Compose | Identical environment locally and in production |
@@ -121,6 +122,8 @@ These are the parts of this project that came from actually hitting and solving 
 **Fire-and-forget webhooks.** Webhook delivery is dispatched after a transfer commits but is never awaited by the request path — a slow or failing third-party endpoint can't add latency to, or break, the transfer itself. Delivery is signed with HMAC-SHA256 so receivers can verify authenticity independently.
 
 **Reversal never mutates history.** `POST /transfers/:id/reverse` (ADMIN/SUPPORT only) doesn't edit or delete the original transfer's ledger entries — it creates a brand new transfer with the debit/credit flipped, and only then marks the original `REVERSED`. The append-only design that makes the ledger auditable in the first place is exactly what makes reversal safe: the full history of "money moved, then moved back" is always reconstructible, never overwritten.
+
+**Rate limiting scoped to actual risk, not blanket throttling.** A generous global default (100 req/min) covers normal API usage, but `/auth/login` and `/auth/register` are throttled far more tightly (5 req/min) since those are the actual brute-force and spam-registration targets — verified live: 5 rapid login attempts succeed (or fail on bad credentials) normally, the 6th gets a `429` with a `Retry-After` header, and the window correctly resets after 60 seconds rather than locking the account out indefinitely.
 
 ## Getting started
 

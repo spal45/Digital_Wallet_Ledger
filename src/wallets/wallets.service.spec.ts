@@ -19,7 +19,12 @@ interface TransferCreateArgs {
 describe('WalletsService', () => {
   let service: WalletsService;
   let prisma: {
-    wallet: { create: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
+    wallet: {
+      create: jest.Mock;
+      findMany: jest.Mock;
+      findUnique: jest.Mock;
+      count: jest.Mock;
+    };
     ledgerEntry: { groupBy: jest.Mock; aggregate: jest.Mock };
     transfer: {
       findUnique: jest.Mock;
@@ -33,6 +38,7 @@ describe('WalletsService', () => {
         create: jest.fn(),
         findMany: jest.fn(),
         findUnique: jest.fn(),
+        count: jest.fn().mockResolvedValue(0),
       },
       ledgerEntry: {
         groupBy: jest.fn(),
@@ -83,16 +89,23 @@ describe('WalletsService', () => {
   });
 
   describe('findAllForUser', () => {
-    it('returns an empty array without querying ledger entries when there are no wallets', async () => {
+    it('returns an empty page without querying ledger entries when there are no wallets', async () => {
       prisma.wallet.findMany.mockResolvedValue([]);
+      prisma.wallet.count.mockResolvedValue(0);
 
-      const result = await service.findAllForUser('user-1');
+      const result = await service.findAllForUser('user-1', 1, 20);
 
-      expect(result).toEqual([]);
+      expect(result.data).toEqual([]);
+      expect(result.meta).toEqual({
+        total: 0,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      });
       expect(prisma.ledgerEntry.groupBy).not.toHaveBeenCalled();
     });
 
-    it('attaches computed balances to each wallet', async () => {
+    it('attaches computed balances to each wallet and returns pagination meta', async () => {
       prisma.wallet.findMany.mockResolvedValue([
         {
           id: 'wallet-1',
@@ -107,17 +120,35 @@ describe('WalletsService', () => {
           createdAt: new Date(),
         },
       ]);
+      prisma.wallet.count.mockResolvedValue(2);
       prisma.ledgerEntry.groupBy.mockResolvedValue([
         { walletId: 'wallet-1', _sum: { amount: 500 } },
         // wallet-2 has no ledger entries at all
       ]);
 
-      const result = await service.findAllForUser('user-1');
+      const result = await service.findAllForUser('user-1', 1, 20);
 
-      expect(result).toEqual([
+      expect(result.data).toEqual([
         expect.objectContaining({ id: 'wallet-1', balance: 500 }),
         expect.objectContaining({ id: 'wallet-2', balance: 0 }),
       ]);
+      expect(result.meta).toEqual({
+        total: 2,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      });
+    });
+
+    it('requests the correct page of results using skip/take', async () => {
+      prisma.wallet.findMany.mockResolvedValue([]);
+      prisma.wallet.count.mockResolvedValue(45);
+
+      await service.findAllForUser('user-1', 2, 20);
+
+      expect(prisma.wallet.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 20, take: 20 }),
+      );
     });
   });
 

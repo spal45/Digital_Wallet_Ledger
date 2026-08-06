@@ -5,20 +5,24 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { CurrentUserResponseDto } from '../auth/dto/current-user-response.dto';
+import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 import { WalletsService } from './wallets.service';
 import { CreateWalletDto } from './dto/create-wallet.dto';
 import { WalletResponseDto } from './dto/wallet-response.dto';
+import { WalletListResponseDto } from './dto/wallet-list-response.dto';
 import { DepositDto } from './dto/deposit.dto';
 import { DepositResponseDto } from './dto/deposit-response.dto';
 
@@ -51,13 +55,22 @@ export class WalletsController {
   @ApiOperation({
     summary: "List the current user's wallets, with computed balances",
   })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({
     status: 200,
-    description: 'List of wallets',
-    type: [WalletResponseDto],
+    description: 'Paginated list of wallets',
+    type: WalletListResponseDto,
   })
-  findAll(@CurrentUser() user: CurrentUserResponseDto) {
-    return this.walletsService.findAllForUser(user.userId);
+  findAll(
+    @CurrentUser() user: CurrentUserResponseDto,
+    @Query() pagination: PaginationQueryDto,
+  ) {
+    return this.walletsService.findAllForUser(
+      user.userId,
+      pagination.page,
+      pagination.limit,
+    );
   }
 
   @Get(':id')

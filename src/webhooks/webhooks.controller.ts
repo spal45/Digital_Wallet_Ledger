@@ -8,20 +8,23 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { CurrentUserResponseDto } from '../auth/dto/current-user-response.dto';
+import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 import { WebhooksService } from './webhooks.service';
 import { CreateWebhookDto } from './dto/create-webhook.dto';
-import { WebhookResponseDto } from './dto/webhook-response.dto';
+import { WebhookListResponseDto } from './dto/webhook-list-response.dto';
 import { CreateWebhookResponseDto } from './dto/create-webhook-response.dto';
 
 @ApiTags('webhooks')
@@ -51,13 +54,22 @@ export class WebhooksController {
 
   @Get()
   @ApiOperation({ summary: "List the current user's registered webhooks" })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({
     status: 200,
-    description: 'List of webhooks',
-    type: [WebhookResponseDto],
+    description: 'Paginated list of webhooks',
+    type: WebhookListResponseDto,
   })
-  findAll(@CurrentUser() user: CurrentUserResponseDto) {
-    return this.webhooksService.findAllForUser(user.userId);
+  findAll(
+    @CurrentUser() user: CurrentUserResponseDto,
+    @Query() pagination: PaginationQueryDto,
+  ) {
+    return this.webhooksService.findAllForUser(
+      user.userId,
+      pagination.page,
+      pagination.limit,
+    );
   }
 
   @Delete(':id')

@@ -14,6 +14,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/authenticated-user.interface';
+import { buildPaginationMeta } from '../common/dto/pagination-meta.dto';
 import { DepositDto } from './dto/deposit.dto';
 
 @Injectable()
@@ -39,10 +40,19 @@ export class WalletsService {
     }
   }
 
-  async findAllForUser(userId: string) {
-    const wallets = await this.prisma.wallet.findMany({ where: { userId } });
+  async findAllForUser(userId: string, page: number, limit: number) {
+    const [wallets, total] = await Promise.all([
+      this.prisma.wallet.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.wallet.count({ where: { userId } }),
+    ]);
+
     if (wallets.length === 0) {
-      return [];
+      return { data: [], meta: buildPaginationMeta(total, page, limit) };
     }
 
     const sums = await this.prisma.ledgerEntry.groupBy({
@@ -54,10 +64,12 @@ export class WalletsService {
       sums.map((sum) => [sum.walletId, sum._sum.amount ?? 0]),
     );
 
-    return wallets.map((wallet) => ({
+    const data = wallets.map((wallet) => ({
       ...wallet,
       balance: balanceByWalletId.get(wallet.id) ?? 0,
     }));
+
+    return { data, meta: buildPaginationMeta(total, page, limit) };
   }
 
   async findOne(walletId: string, currentUser: AuthenticatedUser) {

@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { randomBytes, createHmac } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { buildPaginationMeta } from '../common/dto/pagination-meta.dto';
 
 export interface TransferEventPayload {
   transferId: string;
@@ -39,14 +40,25 @@ export class WebhooksService {
     };
   }
 
-  async findAllForUser(userId: string) {
-    const webhooks = await this.prisma.webhook.findMany({ where: { userId } });
-    return webhooks.map((webhook) => ({
+  async findAllForUser(userId: string, page: number, limit: number) {
+    const [webhooks, total] = await Promise.all([
+      this.prisma.webhook.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.webhook.count({ where: { userId } }),
+    ]);
+
+    const data = webhooks.map((webhook) => ({
       id: webhook.id,
       url: webhook.url,
       isActive: webhook.isActive,
       createdAt: webhook.createdAt,
     }));
+
+    return { data, meta: buildPaginationMeta(total, page, limit) };
   }
 
   async remove(id: string, userId: string) {

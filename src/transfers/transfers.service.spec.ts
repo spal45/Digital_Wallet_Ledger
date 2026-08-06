@@ -38,7 +38,7 @@ describe('TransfersService', () => {
   };
   let prisma: {
     $transaction: jest.Mock;
-    transfer: { findUnique: jest.Mock; findMany: jest.Mock };
+    transfer: { findUnique: jest.Mock; findMany: jest.Mock; count: jest.Mock };
   };
   let webhooksService: {
     notifyTransferCompleted: jest.Mock;
@@ -65,7 +65,11 @@ describe('TransfersService', () => {
       $transaction: jest.fn((callback: (tx: unknown) => unknown) =>
         callback(tx),
       ),
-      transfer: { findUnique: jest.fn(), findMany: jest.fn() },
+      transfer: {
+        findUnique: jest.fn(),
+        findMany: jest.fn(),
+        count: jest.fn().mockResolvedValue(0),
+      },
     };
     webhooksService = {
       notifyTransferCompleted: jest.fn(),
@@ -396,6 +400,46 @@ describe('TransfersService', () => {
       const result = await service.reverse('transfer-1');
 
       expect(result.id).toBe('reversal-winner');
+    });
+  });
+
+  describe('findAllForUser', () => {
+    it('returns paginated results with meta', async () => {
+      prisma.transfer.findMany.mockResolvedValue([
+        {
+          id: 'transfer-1',
+          amount: 100,
+          status: TransferStatus.COMPLETED,
+          description: null,
+          createdAt: new Date(),
+          ledgerEntries: [
+            { walletId: 'wallet-from', type: 'DEBIT' },
+            { walletId: 'wallet-to', type: 'CREDIT' },
+          ],
+        },
+      ]);
+      prisma.transfer.count.mockResolvedValue(1);
+
+      const result = await service.findAllForUser('user-1', 1, 20);
+
+      expect(result.data).toHaveLength(1);
+      expect(result.meta).toEqual({
+        total: 1,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      });
+    });
+
+    it('requests the correct page of results using skip/take', async () => {
+      prisma.transfer.findMany.mockResolvedValue([]);
+      prisma.transfer.count.mockResolvedValue(45);
+
+      await service.findAllForUser('user-1', 2, 20);
+
+      expect(prisma.transfer.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 20, take: 20 }),
+      );
     });
   });
 });

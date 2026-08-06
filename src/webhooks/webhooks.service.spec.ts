@@ -15,6 +15,7 @@ describe('WebhooksService', () => {
       findMany: jest.Mock;
       findUnique: jest.Mock;
       delete: jest.Mock;
+      count: jest.Mock;
     };
   };
   let fetchMock: jest.Mock;
@@ -26,6 +27,7 @@ describe('WebhooksService', () => {
         findMany: jest.fn(),
         findUnique: jest.fn(),
         delete: jest.fn(),
+        count: jest.fn().mockResolvedValue(0),
       },
     };
 
@@ -60,6 +62,49 @@ describe('WebhooksService', () => {
       expect(createArgs.data.url).toBe('https://example.com/hook');
       expect(createArgs.data.secret).toHaveLength(64); // 32 bytes, hex-encoded
       expect(result.secret).toBeDefined();
+    });
+  });
+
+  describe('findAllForUser', () => {
+    it('returns paginated results with meta, omitting the secret', async () => {
+      prisma.webhook.findMany.mockResolvedValue([
+        {
+          id: 'webhook-1',
+          userId: 'user-1',
+          url: 'https://example.com/hook',
+          secret: 'should-not-appear',
+          isActive: true,
+          createdAt: new Date(),
+        },
+      ]);
+      prisma.webhook.count.mockResolvedValue(1);
+
+      const result = await service.findAllForUser('user-1', 1, 20);
+
+      expect(result.data).toEqual([
+        expect.objectContaining({
+          id: 'webhook-1',
+          url: 'https://example.com/hook',
+        }),
+      ]);
+      expect(result.data[0]).not.toHaveProperty('secret');
+      expect(result.meta).toEqual({
+        total: 1,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      });
+    });
+
+    it('requests the correct page of results using skip/take', async () => {
+      prisma.webhook.findMany.mockResolvedValue([]);
+      prisma.webhook.count.mockResolvedValue(45);
+
+      await service.findAllForUser('user-1', 2, 20);
+
+      expect(prisma.webhook.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 20, take: 20 }),
+      );
     });
   });
 

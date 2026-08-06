@@ -16,6 +16,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/authenticated-user.interface';
 import { WebhooksService } from '../webhooks/webhooks.service';
+import { buildPaginationMeta } from '../common/dto/pagination-meta.dto';
 import { CreateTransferDto } from './dto/create-transfer.dto';
 
 interface LockedWalletRow {
@@ -339,13 +340,23 @@ export class TransfersService {
     );
   }
 
-  async findAllForUser(userId: string) {
-    const transfers = await this.prisma.transfer.findMany({
-      where: { ledgerEntries: { some: { wallet: { userId } } } },
-      include: { ledgerEntries: true },
-      orderBy: { createdAt: 'desc' },
-    });
-    return transfers.map((transfer) => this.toResponse(transfer));
+  async findAllForUser(userId: string, page: number, limit: number) {
+    const where = { ledgerEntries: { some: { wallet: { userId } } } };
+    const [transfers, total] = await Promise.all([
+      this.prisma.transfer.findMany({
+        where,
+        include: { ledgerEntries: true },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.transfer.count({ where }),
+    ]);
+
+    return {
+      data: transfers.map((transfer) => this.toResponse(transfer)),
+      meta: buildPaginationMeta(total, page, limit),
+    };
   }
 
   async findOne(id: string, currentUser: AuthenticatedUser) {

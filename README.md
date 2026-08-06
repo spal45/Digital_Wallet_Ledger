@@ -94,18 +94,20 @@ Full interactive documentation (with a working "Authorize" flow) is at [`/docs`]
 | `POST` | `/auth/login` | — | Exchange credentials for a JWT |
 | `GET` | `/auth/me` | ✓ | Return the authenticated user |
 | `POST` | `/wallets` | ✓ | Create a wallet (one per currency per user) |
-| `GET` | `/wallets` | ✓ | List your wallets with computed balances |
+| `GET` | `/wallets` | ✓ | List your wallets with computed balances (paginated) |
 | `GET` | `/wallets/:id` | ✓ | Get one wallet's balance |
 | `POST` | `/wallets/:id/deposit` | ✓ | Fund a wallet (idempotent) |
 | `POST` | `/transfers` | ✓ | Move money between two wallets (idempotent, atomic) |
-| `GET` | `/transfers` | ✓ | List transfers involving your wallets |
+| `GET` | `/transfers` | ✓ | List transfers involving your wallets (paginated) |
 | `GET` | `/transfers/:id` | ✓ | Get one transfer |
 | `POST` | `/transfers/:id/reverse` | ✓ (ADMIN/SUPPORT) | Reverse a completed transfer via a new opposite-direction transfer |
 | `POST` | `/webhooks` | ✓ | Register a URL to be notified on transfer completion or reversal |
-| `GET` | `/webhooks` | ✓ | List your registered webhooks |
+| `GET` | `/webhooks` | ✓ | List your registered webhooks (paginated) |
 | `DELETE` | `/webhooks/:id` | ✓ | Remove a webhook |
 
 Routes marked ✓ require `Authorization: Bearer <token>`. `ADMIN`/`SUPPORT` roles can access any wallet or transfer; `CUSTOMER` is restricted to their own.
+
+All three paginated list endpoints accept `?page=1&limit=20` (`limit` capped at 100) and respond with `{ data: [...], meta: { total, page, limit, totalPages } }`.
 
 ## Key engineering decisions
 
@@ -124,6 +126,10 @@ These are the parts of this project that came from actually hitting and solving 
 **Reversal never mutates history.** `POST /transfers/:id/reverse` (ADMIN/SUPPORT only) doesn't edit or delete the original transfer's ledger entries — it creates a brand new transfer with the debit/credit flipped, and only then marks the original `REVERSED`. The append-only design that makes the ledger auditable in the first place is exactly what makes reversal safe: the full history of "money moved, then moved back" is always reconstructible, never overwritten.
 
 **Rate limiting scoped to actual risk, not blanket throttling.** A generous global default (100 req/min) covers normal API usage, but `/auth/login` and `/auth/register` are throttled far more tightly (5 req/min) since those are the actual brute-force and spam-registration targets — verified live: 5 rapid login attempts succeed (or fail on bad credentials) normally, the 6th gets a `429` with a `Retry-After` header, and the window correctly resets after 60 seconds rather than locking the account out indefinitely.
+
+**Deployed behind a reverse proxy? Rate limiting silently breaks without `trust proxy`.** Railway (like most PaaS hosts) terminates the real client connection at its own edge and forwards to the container, so Express's `req.ip` — what `ThrottlerGuard` keys its per-client counter on — reflects that proxy hop, not the real client, unless explicitly told to trust it. This was caught by testing against the live deployment, not just locally: the exact same rate-limit test passed on a laptop and silently did nothing in production until `app.set('trust proxy', 1)` was added.
+
+**Stable ordering for pagination.** Every paginated query has an explicit `orderBy: { createdAt: 'desc' }` before its `skip`/`take`. Without a deterministic sort, Postgres doesn't guarantee row order across separate `LIMIT`/`OFFSET` queries — pages could silently return duplicate or missing rows as data changes between requests.
 
 ## Getting started
 

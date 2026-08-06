@@ -5,11 +5,13 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -19,9 +21,11 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { CurrentUserResponseDto } from '../auth/dto/current-user-response.dto';
+import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 import { TransfersService } from './transfers.service';
 import { CreateTransferDto } from './dto/create-transfer.dto';
 import { TransferResponseDto } from './dto/transfer-response.dto';
+import { TransferListResponseDto } from './dto/transfer-list-response.dto';
 import { ReverseTransferDto } from './dto/reverse-transfer.dto';
 
 @ApiTags('transfers')
@@ -62,13 +66,22 @@ export class TransfersController {
   @ApiOperation({
     summary: "List transfers involving the current user's wallets",
   })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({
     status: 200,
-    description: 'List of transfers',
-    type: [TransferResponseDto],
+    description: 'Paginated list of transfers',
+    type: TransferListResponseDto,
   })
-  findAll(@CurrentUser() user: CurrentUserResponseDto) {
-    return this.transfersService.findAllForUser(user.userId);
+  findAll(
+    @CurrentUser() user: CurrentUserResponseDto,
+    @Query() pagination: PaginationQueryDto,
+  ) {
+    return this.transfersService.findAllForUser(
+      user.userId,
+      pagination.page,
+      pagination.limit,
+    );
   }
 
   @Get(':id')

@@ -1,11 +1,13 @@
 # Digital Wallet Ledger
 
 [![CI](https://github.com/spal45/Digital_Wallet_Ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/spal45/Digital_Wallet_Ledger/actions/workflows/ci.yml)
-[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen)](https://digitalwalletledger-production.up.railway.app/docs)
+[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen)](https://digital-wallet-ledger-iu73.onrender.com/docs)
 
 A backend service for moving money between wallets, built the way real financial systems are built: an **append-only double-entry ledger**, **idempotent transfers**, and **row-level locking** to guarantee correctness under concurrent load — not a single mutable `balance` column that trusts every write to be correct.
 
-**Live API + interactive docs:** https://digitalwalletledger-production.up.railway.app/docs
+**Live API + interactive docs:** https://digital-wallet-ledger-iu73.onrender.com/docs
+
+> Hosted on Render's free tier, which spins down after 15 minutes of inactivity — the first request after idle can take 30-50 seconds to wake up.
 
 ## Why this project
 
@@ -82,11 +84,11 @@ A transfer of ₹10 from Wallet A to Wallet B never touches a `balance` field. I
 | Testing | Jest + Supertest | Unit tests (mocked Prisma) + real e2e tests against a live Postgres |
 | Containerization | Docker (multi-stage build) + Docker Compose | Identical environment locally and in production |
 | CI | GitHub Actions | Lint, typecheck, unit tests, e2e tests against a service-container Postgres, and a production build on every push |
-| Hosting | Railway (app) + Supabase (database) | Container-native deploy, managed Postgres |
+| Hosting | Render (app) + Supabase (database) | Container-native deploy, managed Postgres |
 
 ## API reference
 
-Full interactive documentation (with a working "Authorize" flow) is at [`/docs`](https://digitalwalletledger-production.up.railway.app/docs). Summary:
+Full interactive documentation (with a working "Authorize" flow) is at [`/docs`](https://digital-wallet-ledger-iu73.onrender.com/docs). Summary:
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
@@ -119,7 +121,7 @@ These are the parts of this project that came from actually hitting and solving 
 
 **Automated proof, not a one-off demo.** [`test/transfers-concurrency.e2e-spec.ts`](test/transfers-concurrency.e2e-spec.ts) boots the real app against a real Postgres, fires 10 concurrent transfer requests against an 800-balance wallet, and asserts exactly 8 succeed, exactly 2 are rejected, every successful transfer ID is unique, and both wallets' final balances are exact. This runs on every CI push.
 
-**Supabase's pooling modes are not interchangeable.** The app's normal queries use Supabase's Transaction pooler (many short-lived connections — right for high-concurrency API traffic). Migrations need a different guarantee: one stable session for their advisory lock. Reusing the Transaction pooler for migrations was tested directly and reliably hangs, confirming why a separate connection type is necessary. Supabase's raw "Direct connection" is IPv6-only, which silently breaks from inside Docker (containers only get outbound IPv4) — the actual fix is Supabase's **Session pooler**: IPv4-reachable, but with true single-session semantics.
+**Supabase's pooling modes are not interchangeable.** The app's normal queries use Supabase's Transaction pooler (many short-lived connections — right for high-concurrency API traffic). Migrations need a different guarantee: one stable session for their advisory lock. Reusing the Transaction pooler for migrations was tested directly and reliably hangs, confirming why a separate connection type is necessary. Supabase's raw "Direct connection" is IPv6-only, which silently breaks from any container host with only outbound IPv4 (reproduced identically on both Docker locally and on Render's free tier) — the actual fix is Supabase's **Session pooler**: IPv4-reachable, but with true single-session semantics.
 
 **Fire-and-forget webhooks.** Webhook delivery is dispatched after a transfer commits but is never awaited by the request path — a slow or failing third-party endpoint can't add latency to, or break, the transfer itself. Delivery is signed with HMAC-SHA256 so receivers can verify authenticity independently.
 
@@ -127,7 +129,7 @@ These are the parts of this project that came from actually hitting and solving 
 
 **Rate limiting scoped to actual risk, not blanket throttling.** A generous global default (100 req/min) covers normal API usage, but `/auth/login` and `/auth/register` are throttled far more tightly (5 req/min) since those are the actual brute-force and spam-registration targets — verified live: 5 rapid login attempts succeed (or fail on bad credentials) normally, the 6th gets a `429` with a `Retry-After` header, and the window correctly resets after 60 seconds rather than locking the account out indefinitely.
 
-**Deployed behind a reverse proxy? Rate limiting silently breaks without `trust proxy`.** Railway (like most PaaS hosts) terminates the real client connection at its own edge and forwards to the container, so Express's `req.ip` — what `ThrottlerGuard` keys its per-client counter on — reflects that proxy hop, not the real client, unless explicitly told to trust it. This was caught by testing against the live deployment, not just locally: the exact same rate-limit test passed on a laptop and silently did nothing in production until `app.set('trust proxy', 1)` was added.
+**Deployed behind a reverse proxy? Rate limiting silently breaks without `trust proxy`.** PaaS hosts (originally found on Railway; the same fix is required on Render, and would be on almost any container host) terminate the real client connection at their own edge and forward to the container, so Express's `req.ip` — what `ThrottlerGuard` keys its per-client counter on — reflects that proxy hop, not the real client, unless explicitly told to trust it. This was caught by testing against the live deployment, not just locally: the exact same rate-limit test passed on a laptop and silently did nothing in production until `app.set('trust proxy', 1)` was added.
 
 **Stable ordering for pagination.** Every paginated query has an explicit `orderBy: { createdAt: 'desc' }` before its `skip`/`take`. Without a deterministic sort, Postgres doesn't guarantee row order across separate `LIMIT`/`OFFSET` queries — pages could silently return duplicate or missing rows as data changes between requests.
 
@@ -176,7 +178,7 @@ CI runs all of the above, plus a production build, on every push — see the bad
 
 ## Deployment
 
-- **App:** containerized via the multi-stage [`Dockerfile`](Dockerfile), deployed on [Railway](https://railway.com), built directly from this repo on every push to `main`.
+- **App:** containerized via the multi-stage [`Dockerfile`](Dockerfile), deployed on [Render](https://render.com), built directly from this repo on every push to `main`.
 - **Database:** [Supabase](https://supabase.com) Postgres. The container's entrypoint ([`docker-entrypoint.sh`](docker-entrypoint.sh)) runs `prisma migrate deploy` on every boot, so schema changes ship automatically with the next deploy.
 - **Migrations locally vs. production** are deliberately separate workflows: `npm run migrate:dev` (local Postgres, generates new migration files) vs. `npm run migrate:deploy:supabase` (applies already-committed migrations to Supabase) — see [`prisma.config.ts`](prisma.config.ts).
 
